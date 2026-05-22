@@ -15,15 +15,16 @@ def alert():
     data = request.get_json(silent=True)
 
     if data is None:
+        app.logger.warning("No JSON received")
         return jsonify({"error": "No JSON received"}), 400
 
-    print("Received alert:", data)
+    app.logger.warning(f"Received alert JSON: {data}")
 
     return jsonify({
         "status": "success",
         "message": "Alert received",
         "data": data
-    })
+    }), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
