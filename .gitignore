@@ -207,3 +207,25 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 cs131-final-project-497022-2ea8a43abe27.json
+
+# React / Vite dashboard
+node_modules/
+pet-monitoring-dashboard/node_modules/
+pet-monitoring-dashboard/dist/
+pet-monitoring-dashboard/.env
+pet-monitoring-dashboard/.env.local
+pet-monitoring-dashboard/.env.development.local
+pet-monitoring-dashboard/.env.test.local
+pet-monitoring-dashboard/.env.production.local
+pet-monitoring-dashboard/npm-debug.log*
+pet-monitoring-dashboard/yarn-debug.log*
+pet-monitoring-dashboard/yarn-error.log*
+pet-monitoring-dashboard/pnpm-debug.log*
+
+# OS files
+.DS_Store
+
+# Google/Firebase service account keys
+serviceAccountKey.json
+pet-monitoring-dashboard/serviceAccountKey.json
+*.json.key
