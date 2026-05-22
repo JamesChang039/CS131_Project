@@ -2,11 +2,27 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import torch
+import os
+import json
+import datetime
+import tempfile
+
+from google.cloud import storage, pubsub_v1
+from twilio.rest import Client as TwilioClient
 
 # Configuration
 MAX_PLAYROOM_CAPACITY = 3
 IMAGE_PATH = "pet_daycare3.jpg"
 ALERT_TEXT = ""
+
+DEVICE_ID      = os.environ.get("DEVICE_ID",   "jetson-nano-01")
+GCS_BUCKET     = os.environ.get("GCS_BUCKET",  "cs131detections")
+PUBSUB_TOPIC   = os.environ.get("PUBSUB_TOPIC", "projects/cs131-final-project-497022/topics/detections")
+
+TWILIO_SID     = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_TOKEN   = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_FROM    = os.environ.get("TWILIO_FROM")
+ALERT_TO       = os.environ.get("ALERT_TO")
 
 # Define dynamic zone ratios to cover the ENTIRE image
 ZONE_RATIOS = np.array([
@@ -15,6 +31,117 @@ ZONE_RATIOS = np.array([
     [1.0, 1.0],
     [0.0, 1.0]
 ])
+
+def upload_snapshot_to_gcs(frame: np.ndarray, alert_label: str) -> str:
+    try:
+        timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+        filename  = f"alerts/{DEVICE_ID}/snapshot_{alert_label.replace(' ', '_')}_{timestamp}.jpg"
+ 
+        # Write frame to a temp file
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+        cv2.imwrite(tmp_path, frame)
+ 
+        # Upload to GCS
+        gcs_client = storage.Client()
+        bucket     = gcs_client.bucket(GCS_BUCKET)
+        blob       = bucket.blob(filename)
+        blob.upload_from_filename(tmp_path, content_type="image/jpeg")
+        os.remove(tmp_path)
+ 
+        gcs_uri = f"gs://{GCS_BUCKET}/{filename}"
+        print(f"[GCS] Snapshot uploaded: {gcs_uri}")
+        return gcs_uri
+ 
+    except Exception as e:
+        print(f"[GCS] Upload failed: {e}")
+        return "unavailable"
+ 
+ 
+def generate_signed_url(gcs_uri: str, expiration_minutes: int = 60) -> str:
+    try:
+        # Parse bucket and blob from gs://bucket/path
+        path        = gcs_uri.replace("gs://", "")
+        bucket_name = path.split("/")[0]
+        blob_name   = "/".join(path.split("/")[1:])
+ 
+        gcs_client = storage.Client()
+        bucket     = gcs_client.bucket(bucket_name)
+        blob       = bucket.blob(blob_name)
+ 
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=expiration_minutes * 60,
+            method="GET"
+        )
+        return signed_url
+ 
+    except Exception as e:
+        print(f"[GCS] Could not generate signed URL: {e}")
+        return gcs_uri  # fallback to raw GCS path
+ 
+ 
+def publish_to_pubsub(alert_label: str, zone_count: int, gcs_uri: str, detections: list):
+    try:
+        publisher = pubsub_v1.PublisherClient()
+ 
+        payload = {
+            "device_id":   DEVICE_ID,
+            "timestamp":   datetime.datetime.utcnow().isoformat(),
+            "alert": {
+                "label":       alert_label,
+                "zone_count":  zone_count,
+                "max_capacity": MAX_PLAYROOM_CAPACITY,
+                "snapshot_url": gcs_uri,
+                "detections":  detections   # list of detected labels
+            }
+        }
+ 
+        future = publisher.publish(PUBSUB_TOPIC, json.dumps(payload).encode("utf-8"))
+        print(f"[PubSub] Alert published. Message ID: {future.result()}")
+ 
+    except Exception as e:
+        print(f"[PubSub] Publish failed: {e}")
+ 
+ 
+def send_twilio_sms(alert_label: str, zone_count: int, signed_url: str, detections: list):
+    if not all([TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM, ALERT_TO]):
+        print("[Twilio] Missing env vars — skipping direct SMS.")
+        return
+ 
+    try:
+        client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+ 
+        detection_summary = "\n".join(f"  • {d}" for d in detections) or "  • None"
+ 
+        body = (
+            f"{alert_label}\n"
+            f"──────────────────\n"
+            f"Device   : {DEVICE_ID}\n"
+            f"Count    : {zone_count}/{MAX_PLAYROOM_CAPACITY} max\n"
+            f"Time     : {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+            f"Detected :\n{detection_summary}\n"
+            f"Snapshot : {signed_url}"
+        )
+ 
+        message = client.messages.create(body=body, from_=TWILIO_FROM, to=ALERT_TO)
+        print(f"[Twilio] SMS sent! SID: {message.sid}")
+ 
+    except Exception as e:
+        print(f"[Twilio] SMS failed: {e}")
+ 
+ 
+def send_alert(frame: np.ndarray, alert_label: str, zone_count: int, detections: list):
+    print(f"\n[ALERT] {alert_label} — triggering alert pipeline...")
+ 
+    gcs_uri    = upload_snapshot_to_gcs(frame, alert_label)
+    signed_url = generate_signed_url(gcs_uri)
+ 
+    publish_to_pubsub(alert_label, zone_count, gcs_uri, detections)
+    send_twilio_sms(alert_label, zone_count, signed_url, detections)
+ 
+    print(f"[ALERT] Pipeline complete.\n")
+
 
 print("Loading Optimized Deep Learning Models...")
 device = "mps" if torch.backends.mps.is_available() else 'cpu'
@@ -92,7 +219,16 @@ print(f"Device: {device.upper()} | Entities Found: {zone_count}")
 if zone_count > MAX_PLAYROOM_CAPACITY:
     ALERT_TEXT = "OVERCROWDING ALERT"
     cv2.putText(frame, ALERT_TEXT, (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+    detected_labels = [det["label"] for det in detection_list]
+
     # Send alert to google cloud
     # Send_To_Google_Cloud(ALERT_TEXT)
+    send_alert(
+        frame        = frame,
+        alert_label  = ALERT_TEXT,
+        zone_count   = zone_count,
+        detections   = detected_labels
+    )
 
 cv2.imwrite("output_detection.jpg", frame)
