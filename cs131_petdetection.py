@@ -165,7 +165,7 @@ while cap.isOpened():
 
     # Run detector with half-precision (if it detects a CUDA compatible GPU)
     results = detector_model(frame, stream=True, half=(device == 'cuda'))
-    zone_count = 0
+    dog_count = 0
 
     # Data structures to handle batch classification
     dog_crops = []
@@ -186,11 +186,12 @@ while cap.isOpened():
                 bottom_center = (int((x1 + x2) / 2), y2)
 
                 if cv2.pointPolygonTest(ZONES["focus_zone"], bottom_center, False) >= 0:
-                    zone_count += 1
+
                     cv2.circle(frame, bottom_center, 6, (0, 0, 255), -1)
                     detection_data = {"coords": (x1, y1, x2, y2), "class": class_name, "label": class_name.title()}
 
                     if class_name == "dog":
+                        dog_count += 1
                         pad = 10
                         crop = frame[max(0, y1 - pad):min(frame_h, y2 + pad), max(0, x1 - pad):min(frame_w, x2 + pad)]
                         if crop.size > 0:
@@ -218,9 +219,9 @@ while cap.isOpened():
         cv2.putText(frame, det["label"], (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 150, 0), 2)
         print(det["label"])
 
-    print(f"Device: {device.upper()} | Entities Found: {zone_count}")
+    print(f"Device: {device.upper()} | Number of Dogs: {dog_count}")
 
-    if zone_count > MAX_PLAYROOM_CAPACITY:
+    if dog_count > MAX_PLAYROOM_CAPACITY:
         ALERT_TEXT = "OVERCROWDING ALERT"
         cv2.putText(frame, ALERT_TEXT, (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
 
@@ -231,7 +232,7 @@ while cap.isOpened():
         send_alert(
             frame=frame,
             alert_label=ALERT_TEXT,
-            zone_count=zone_count,
+            zone_count=dog_count,
             detections=detected_labels
         )
     cv2.imshow("Jetson Pet Detection", frame)
