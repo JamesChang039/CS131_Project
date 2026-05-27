@@ -6,9 +6,20 @@ import os
 import json
 import datetime
 import tempfile
+import requests
 
-from google.cloud import storage, pubsub_v1
-from twilio.rest import Client as TwilioClient
+# Optional imports for the old GCS/PubSub/Twilio pipeline.
+# Option 2 only sends alerts to Cloud Run, so these are not required.
+try:
+    from google.cloud import storage, pubsub_v1
+except ImportError:
+    storage = None
+    pubsub_v1 = None
+
+try:
+    from twilio.rest import Client as TwilioClient
+except ImportError:
+    TwilioClient = None
 
 # Configuration
 MAX_PLAYROOM_CAPACITY = 3
@@ -16,6 +27,11 @@ IMAGE_PATH = "pet_daycare3.jpg"
 ALERT_TEXT = ""
 
 DEVICE_ID      = os.environ.get("DEVICE_ID",   "jetson-nano-01")
+CLOUD_RUN_ALERT_URL = os.environ.get(
+    "CLOUD_RUN_ALERT_URL",
+    "https://cs131-project-828167211823.europe-west1.run.app/alert"
+)
+
 GCS_BUCKET     = os.environ.get("GCS_BUCKET",  "cs131detections")
 PUBSUB_TOPIC   = os.environ.get("PUBSUB_TOPIC", "projects/cs131-final-project-497022/topics/detections")
 
@@ -132,15 +148,28 @@ def send_twilio_sms(alert_label: str, zone_count: int, signed_url: str, detectio
  
  
 def send_alert(frame: np.ndarray, alert_label: str, zone_count: int, detections: list):
-    print(f"\n[ALERT] {alert_label} — triggering alert pipeline...")
- 
-    gcs_uri    = upload_snapshot_to_gcs(frame, alert_label)
-    signed_url = generate_signed_url(gcs_uri)
- 
-    publish_to_pubsub(alert_label, zone_count, gcs_uri, detections)
-    send_twilio_sms(alert_label, zone_count, signed_url, detections)
- 
+    print(f"\n[ALERT] {alert_label} — triggering Cloud Run alert pipeline...")
+
+    payload = {
+        "device_id": DEVICE_ID,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "alert": {
+            "label": alert_label,
+            "zone_count": zone_count,
+            "max_capacity": MAX_PLAYROOM_CAPACITY,
+            "detections": detections
+        }
+    }
+
+    try:
+        response = requests.post(CLOUD_RUN_ALERT_URL, json=payload, timeout=5)
+        print(f"[Cloud Run] Status: {response.status_code}")
+        print(f"[Cloud Run] Response: {response.text}")
+    except Exception as e:
+        print(f"[Cloud Run] Failed to send alert: {e}")
+
     print(f"[ALERT] Pipeline complete.\n")
+
 
 
 print("Loading Optimized Deep Learning Models...")
