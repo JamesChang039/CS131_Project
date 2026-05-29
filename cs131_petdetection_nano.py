@@ -46,8 +46,9 @@ breed_lock = threading.Lock()
 
 # Alert state (guarded by alert_lock)
 alert_lock            = threading.Lock()
-alert_restricted_ts   = 0.0   # last time a "restricted zone" alert was shown
-alert_crowded_ts      = 0.0   # last time a "crowded" alert was shown
+alert_restricted_until   = 0.0   # last time a "restricted zone" alert was shown
+alert_crowded_until     = 0.0   # last time a "crowded" alert was shown
+ALERT_DISPLAY_SEC       = 5.0
 
 def start_ffmpeg_stream():
    if RTMP_URL is None:
@@ -376,25 +377,28 @@ try:
                     (mid_x + 6, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 50, 255), 2, cv2.LINE_AA)
  
         # ── Alert banners ─────────────────────────────────────────────────────
- 
+        banner_y = 0
+
         if restricted_pet_count > 0:
             with alert_lock:
-                show = (now - alert_restricted_ts) >= ALERT_COOLDOWN_SEC or alert_restricted_ts == 0
-                if show:
-                    alert_restricted_ts = now
-            msg = (f"ALERT: {restricted_pet_count} PET(S) IN RESTRICTED ZONE!"
-                   if restricted_pet_count > 1
-                   else "ALERT: PET DETECTED IN RESTRICTED ZONE!")
-            draw_alert_banner(frame, msg, (0, 0, 200), y_offset=banner_y)
-            banner_y += 46
+                alert_restricted_until = now + ALERT_DISPLAY_SEC
  
         if daycare_pet_count > DAYCARE_CROWD_THRESHOLD:
             with alert_lock:
-                show = (now - alert_crowded_ts) >= ALERT_COOLDOWN_SEC or alert_crowded_ts == 0
-                if show:
-                    alert_crowded_ts = now
+                alert_crowded_until = now + ALERT_DISPLAY_SEC
+
+        with alert_lock:
+            show_restricted = now < alert_restricted_until
+            show_crowded = now < alert_crowded_until
+
+        if show_restricted:
+            msg = (f"ALERT: {restricted_pet_count} PET(S) IN RESTRICTED ZONE!")
+            draw_alert_banner(frame, msg, (0,0,200), y_offset=banner_y)
+            banner_y += 46
+        
+        if show_crowded:
             msg = f"CROWDED: {daycare_pet_count} PETS IN DAYCARE ZONE (limit {DAYCARE_CROWD_THRESHOLD})"
-            draw_alert_banner(frame, msg, (0, 130, 200), y_offset=banner_y)
+            draw_alert_banner(frame, msg, (0,130,200), y_offset=banner_y)
  
         cv2.imshow("Jetson Pet Detection", frame)
  
