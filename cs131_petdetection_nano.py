@@ -7,10 +7,24 @@ import subprocess
 import threading
 import time
 import queue
+import requests
+import datetime
+import socket
 
 # =========================
 # Configuration
 # =========================
+MAX_PLAYROOM_CAPACITY = 3
+
+DEVICE_ID = os.environ.get("DEVICE_ID", socket.gethostname())
+
+CLOUD_RUN_ALERT_URL = os.environ.get(
+    "CLOUD_RUN_ALERT_URL",
+    "https://cs131-project-828167211823.europe-west1.run.app/alert"
+)
+
+ALERT_COOLDOWN_SECONDS = 15
+last_alert_time = 0
 
 RTMP_URL = os.environ.get("RTMP_URL")
 
@@ -227,6 +241,37 @@ packer_thread.start()
 classifier_thread = threading.Thread(target=breed_classifier_worker, daemon=True)
 classifier_thread.start()
 
+"""
+Send Alert
+"""
+def send_alert(alert_label: str, zone_count: int, detections: list):
+    print(f"\n[ALERT] {alert_label} — sending alert to Cloud Run...")
+
+    payload = {
+        "device_id": DEVICE_ID,
+        "camera_id": DEVICE_ID,
+        "event_type": alert_label.lower().replace(" ", "_"),
+        "label": alert_label,
+        "zone_count": zone_count,
+        "max_capacity": MAX_PLAYROOM_CAPACITY,
+        "detections": detections,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+
+    try:
+        response = requests.post(
+            CLOUD_RUN_ALERT_URL,
+            json=payload,
+            timeout=5
+        )
+
+        print(f"[Cloud Run] Status: {response.status_code}")
+        print(f"[Cloud Run] Response: {response.text}")
+
+    except Exception as e:
+        print(f"[Cloud Run] Failed to send alert: {e}")
+
+    print("[ALERT] Pipeline complete.\n")
 
 # =========================
 # Main AI Processing Loop
@@ -245,12 +290,7 @@ try:
        focus_zone_coords = (ZONE_RATIOS * [frame_w, frame_h]).astype(np.int32)
        ZONES = {"focus_zone": focus_zone_coords}
 
-       results = detector_model.track(
-           frame,
-           persist=True, 
-           tracker="bytetrack.yaml", 
-           verbose=False
-       )
+       results = detector_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
 
        zone_count = 0
        detection_list = []
@@ -262,7 +302,7 @@ try:
                    class_id = int(box.cls[0])
                    track_id = int(track_id_tensor.item())
 
-                   if class_id in [0,16]:
+                   if class_id in [0, 16]:
                        x1, y1, x2, y2 = map(int, box.xyxy[0])
                        bottom_center = (int((x1 + x2) / 2), y2)
 
@@ -280,25 +320,31 @@ try:
                                    display_label = f"ID {track_id}: {breed_status}"
                                else:
                                    display_label = f"ID {track_id}: Analyzing Breed..."
-                                   
+
                                    if not classifier_queue.full():
                                        pad = 10
-                                       crop = frame[
-                                           max(0, y1 - pad):min(frame_h, y2 + pad),
-                                           max(0, x1 - pad):min(frame_w, x2 + pad)
-                                       ]
+                                       crop = frame[max(0, y1 - pad):min(frame_h, y2 + pad), max(0, x1 - pad):min(frame_w, x2 + pad)]
+
                                        if crop.size > 0:
                                            classifier_queue.put_nowait({"crop": crop, "id": track_id})
 
-                           detection_list.append({
-                               "coords": (x1, y1, x2, y2),
-                               "label": display_label
-                           })
+                           detection_list.append({"coords": (x1, y1, x2, y2), "label": display_label})
 
        for det in detection_list:
            x1, y1, x2, y2 = det["coords"]
            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
            cv2.putText(frame, det["label"], (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 150, 0), 2)
+
+       current_time = time.time()
+
+       if zone_count > MAX_PLAYROOM_CAPACITY:
+           alert_text = "OVERCROWDING ALERT"
+           cv2.putText(frame, alert_text, (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+           if current_time - last_alert_time >= ALERT_COOLDOWN_SECONDS:
+               detected_labels = [det["label"] for det in detection_list]
+               send_alert(alert_label=alert_text, zone_count=zone_count, detections=detected_labels)
+               last_alert_time = current_time
 
        cv2.putText(frame, f"Entities: {zone_count}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
        cv2.imshow("Jetson Pet Detection", frame)
@@ -309,7 +355,6 @@ try:
                frame_queue.get_nowait()
            except queue.Empty:
                pass
-               
        frame_queue.put(yuv_frame)
 
        if cv2.waitKey(1) & 0xFF == ord("q"):
