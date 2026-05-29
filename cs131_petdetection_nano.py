@@ -10,6 +10,12 @@ import queue
 import requests
 import datetime
 import socket
+import tempfile
+from google.cloud import storage
+
+#run this on jetson terminal first
+#export GOOGLE_APPLICATION_CREDENTIALS="path to json file"
+#export FIREBASE_STORAGE_BUCKET="cs131-final-project-497022.firebasestorage.app"
 
 # =========================
 # Configuration
@@ -22,6 +28,7 @@ CLOUD_RUN_ALERT_URL = os.environ.get(
     "CLOUD_RUN_ALERT_URL",
     "https://cs131-project-828167211823.europe-west1.run.app/alert"
 )
+FIREBASE_STORAGE_BUCKET = os.environ.get("FIREBASE_STORAGE_BUCKET", "gs://cs131-final-project-497022.firebasestorage.app")
 
 ALERT_COOLDOWN_SECONDS = 15
 last_alert_time = 0
@@ -241,11 +248,42 @@ packer_thread.start()
 classifier_thread = threading.Thread(target=breed_classifier_worker, daemon=True)
 classifier_thread.start()
 
+#Upload snapshot
+def upload_snapshot_to_storage(frame: np.ndarray, alert_label: str) -> str:
+    try:
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
+        safe_label = alert_label.lower().replace(" ", "_")
+        filename = f"alerts/{DEVICE_ID}/snapshot_{safe_label}_{timestamp}.jpg"
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        cv2.imwrite(tmp_path, frame)
+
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(FIREBASE_STORAGE_BUCKET)
+        blob = bucket.blob(filename)
+        blob.upload_from_filename(tmp_path, content_type="image/jpeg")
+
+        os.remove(tmp_path)
+
+        gcs_uri = f"gs://{FIREBASE_STORAGE_BUCKET}/{filename}"
+        print(f"[Storage] Snapshot uploaded: {gcs_uri}")
+
+        return gcs_uri
+
+    except Exception as e:
+        print(f"[Storage] Snapshot upload failed: {e}")
+        return "unavailable"
+
+
 """
 Send Alert
 """
-def send_alert(alert_label: str, zone_count: int, detections: list):
-    print(f"\n[ALERT] {alert_label} — sending alert to Cloud Run...")
+def send_alert(frame: np.ndarray, alert_label: str, zone_count: int, detections: list):
+    print(f"\n[ALERT] {alert_label} — uploading snapshot and sending alert to Cloud Run...")
+
+    snapshot_uri = upload_snapshot_to_storage(frame, alert_label)
 
     payload = {
         "device_id": DEVICE_ID,
@@ -255,16 +293,12 @@ def send_alert(alert_label: str, zone_count: int, detections: list):
         "zone_count": zone_count,
         "max_capacity": MAX_PLAYROOM_CAPACITY,
         "detections": detections,
+        "snapshot_uri": snapshot_uri,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
     }
 
     try:
-        response = requests.post(
-            CLOUD_RUN_ALERT_URL,
-            json=payload,
-            timeout=5
-        )
-
+        response = requests.post(CLOUD_RUN_ALERT_URL, json=payload, timeout=5)
         print(f"[Cloud Run] Status: {response.status_code}")
         print(f"[Cloud Run] Response: {response.text}")
 
@@ -343,7 +377,7 @@ try:
 
            if current_time - last_alert_time >= ALERT_COOLDOWN_SECONDS:
                detected_labels = [det["label"] for det in detection_list]
-               send_alert(alert_label=alert_text, zone_count=zone_count, detections=detected_labels)
+               send_alert(frame=frame.copy(), alert_label=alert_text, zone_count=zone_count, detections=detected_labels)
                last_alert_time = current_time
 
        cv2.putText(frame, f"Entities: {zone_count}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
