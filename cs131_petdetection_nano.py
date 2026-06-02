@@ -28,7 +28,7 @@ CLOUD_RUN_ALERT_URL = os.environ.get(
     "CLOUD_RUN_ALERT_URL",
     "https://cs131-project-828167211823.europe-west1.run.app/alert"
 )
-FIREBASE_STORAGE_BUCKET = os.environ.get("FIREBASE_STORAGE_BUCKET", "gs://cs131-final-project-497022.firebasestorage.app")
+FIREBASE_STORAGE_BUCKET = os.environ.get("FIREBASE_STORAGE_BUCKET", "cs131-final-project-497022.firebasestorage.app")
 
 ALERT_COOLDOWN_SECONDS = 15
 last_alert_time = 0
@@ -478,7 +478,32 @@ try:
         if show_crowded:
             msg = f"CROWDED: {daycare_pet_count} PETS IN DAYCARE ZONE (limit {DAYCARE_CROWD_THRESHOLD})"
             draw_alert_banner(frame, msg, (0,130,200), y_offset=banner_y)
- 
+
+
+        # ── Send Cloud/Firebase alert ───────────────────────────────────────
+        current_time = time.time()
+
+        if current_time - last_alert_time >= ALERT_COOLDOWN_SECONDS:
+            detected_labels = [det["label"] for det in detection_list]
+
+            if restricted_pet_count > 0:
+                send_alert(
+                    frame=frame.copy(),
+                    alert_label="Restricted Zone Alert",
+                    zone_count=restricted_pet_count,
+                    detections=detected_labels
+                )
+                last_alert_time = current_time
+
+            elif daycare_pet_count > DAYCARE_CROWD_THRESHOLD:
+                send_alert(
+                    frame=frame.copy(),
+                    alert_label="Crowded Daycare Alert",
+                    zone_count=daycare_pet_count,
+                    detections=detected_labels
+                )
+                last_alert_time = current_time
+
         cv2.imshow("Jetson Pet Detection", frame)
  
         yuv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420)
