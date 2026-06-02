@@ -40,12 +40,21 @@ STREAM_HEIGHT = 480
 STREAM_FPS = 15
 FRAME_DELAY = 1.0 / STREAM_FPS  
 
-ZONE_RATIOS = np.array([
-   [0.0, 0.0],
-   [1.0, 0.0],
-   [1.0, 1.0],
-   [0.0, 1.0]
-])
+# --- Zone Split (left = daycare, right = restricted) ---
+# The screen is split exactly down the middle on the X axis.
+DAYCARE_ZONE_RATIO    = np.array([[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]])
+RESTRICTED_ZONE_RATIO = np.array([[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]])
+ 
+# Alert thresholds
+DAYCARE_CROWD_THRESHOLD = 3       # "Crowded" when pet count EXCEEDS this value
+ALERT_COOLDOWN_SEC      = 3.0     # Seconds between repeated on-screen alerts
+
+# ZONE_RATIOS = np.array([
+#    [0.0, 0.0],
+#    [1.0, 0.0],
+#    [1.0, 1.0],
+#    [0.0, 1.0]
+# ])
 
 frame_queue = queue.Queue(maxsize=30)
 classifier_queue = queue.Queue(maxsize=2) 
@@ -55,6 +64,12 @@ running = True
 # Thread-safe storage mapped directly to persistent Tracking IDs
 latest_breeds = {}
 breed_lock = threading.Lock()
+
+# Alert state (guarded by alert_lock)
+alert_lock            = threading.Lock()
+alert_restricted_until   = 0.0   # last time a "restricted zone" alert was shown
+alert_crowded_until     = 0.0   # last time a "crowded" alert was shown
+ALERT_DISPLAY_SEC       = 5.0
 
 def start_ffmpeg_stream():
    if RTMP_URL is None:
@@ -143,10 +158,6 @@ with torch.no_grad():
     
 print("GPU Engines ready and execution contexts mapped.")
 
-
-# =========================
-# Asynchronous GPU Breed Classifier Thread
-# =========================
 # =========================
 # Asynchronous GPU Breed Classifier Thread
 # =========================
@@ -229,6 +240,24 @@ def breed_classifier_worker():
 
         finally:
             classifier_queue.task_done()
+
+# =========================
+# Alert Overlay Helper
+# =========================
+ 
+def draw_alert_banner(frame, message, color, y_offset=0):
+    overlay = frame.copy()
+    banner_h = 44
+    y_start  = y_offset
+    y_end    = y_offset + banner_h
+    cv2.rectangle(overlay, (0, y_start), (frame.shape[1], y_end), color, -1)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+    cv2.putText(
+        frame, message,
+        (10, y_start + 30),
+        cv2.FONT_HERSHEY_DUPLEX, 0.85, (255, 255, 255), 2, cv2.LINE_AA,
+    )
+
 # =========================
 # Start Camera & Workers
 # =========================
@@ -314,85 +343,154 @@ def send_alert(frame: np.ndarray, alert_label: str, zone_count: int, detections:
 print("Processing frames cleanly. Stream running smoothly on GPU. Press 'q' to quit.")
 
 try:
-   while cap.isOpened() and running:
-       success, frame = cap.read()
-       if not success:
-           break
+    while cap.isOpened() and running:
+        success, frame = cap.read()
+        if not success:
+            break
+ 
+        frame   = cv2.resize(frame, (STREAM_WIDTH, STREAM_HEIGHT))
+        frame_h, frame_w = frame.shape[:2]
+        now     = time.time()
+ 
+        # ── Build zone polygon coordinates ──────────────────────────────────
+        daycare_zone    = (DAYCARE_ZONE_RATIO    * [frame_w, frame_h]).astype(np.int32)
+        restricted_zone = (RESTRICTED_ZONE_RATIO * [frame_w, frame_h]).astype(np.int32)
+ 
+        # ── Draw zone backgrounds (semi-transparent tint) ───────────────────
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [daycare_zone],    (0, 180, 0))    # green tint  – daycare
+        cv2.fillPoly(overlay, [restricted_zone], (0, 0, 200))    # red tint    – restricted
+        cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
+ 
+        # ── Draw zone borders & labels ───────────────────────────────────────
+        cv2.polylines(frame, [daycare_zone],    True, (0, 220, 0),  2)
+        cv2.polylines(frame, [restricted_zone], True, (0, 0, 255),  2)
+ 
+        mid_x = frame_w // 2
+        cv2.putText(frame, "DAYCARE ZONE",    (10,       frame_h - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 230, 0),  2, cv2.LINE_AA)
+        cv2.putText(frame, "RESTRICTED ZONE", (mid_x + 6, frame_h - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (50, 50, 255), 2, cv2.LINE_AA)
+ 
+        # ── Run YOLO tracker ─────────────────────────────────────────────────
+        results = detector_model.track(
+            frame, persist=True, tracker="bytetrack.yaml", verbose=False
+        )
+ 
+        daycare_pet_count    = 0
+        restricted_pet_count = 0
+        detection_list       = []
+ 
+        for r in results:
+            if r.boxes is None or r.boxes.id is None:
+                continue
+ 
+            for box, track_id_tensor in zip(r.boxes, r.boxes.id):
+                class_id = int(box.cls[0])
+                track_id = int(track_id_tensor.item())
+ 
+                # class 0 = person, class 16 = dog  (COCO)
+                if class_id not in [0, 16]:
+                    continue
+ 
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                bottom_center   = (int((x1 + x2) / 2), y2)
+ 
+                in_daycare    = cv2.pointPolygonTest(daycare_zone,    bottom_center, False) >= 0
+                in_restricted = cv2.pointPolygonTest(restricted_zone, bottom_center, False) >= 0
+ 
+                if not (in_daycare or in_restricted):
+                    continue   # outside both zones
+ 
+                # ── Zone accounting (pets only, not people) ──────────────────
+                is_pet = (class_id == 16)
+                if is_pet:
+                    if in_daycare:
+                        daycare_pet_count += 1
+                    elif in_restricted:
+                        restricted_pet_count += 1
+ 
+                # ── Build display label ──────────────────────────────────────
+                if class_id == 0:
+                    display_label = f"Person [ID:{track_id}]"
+                else:
+                    with breed_lock:
+                        breed_status = latest_breeds.get(track_id)
+ 
+                    if breed_status is not None:
+                        display_label = f"ID {track_id}: {breed_status}"
+                    else:
+                        display_label = f"ID {track_id}: Analyzing..."
+                        if not classifier_queue.full():
+                            pad  = 10
+                            crop = frame[
+                                max(0, y1 - pad):min(frame_h, y2 + pad),
+                                max(0, x1 - pad):min(frame_w, x2 + pad),
+                            ]
+                            if crop.size > 0:
+                                classifier_queue.put_nowait({"crop": crop, "id": track_id})
+ 
+                # ── Dot & zone indicator ─────────────────────────────────────
+                dot_color = (0, 0, 255) if in_restricted else (0, 200, 0)
+                cv2.circle(frame, bottom_center, 6, dot_color, -1)
+ 
+                detection_list.append({
+                    "coords":       (x1, y1, x2, y2),
+                    "label":        display_label,
+                    "in_restricted": in_restricted,
+                })
+ 
+        # ── Draw bounding boxes ───────────────────────────────────────────────
+        for det in detection_list:
+            x1, y1, x2, y2 = det["coords"]
+            box_color  = (0, 0, 255) if det["in_restricted"] else (255, 120, 0)
+            text_color = (0, 40, 255) if det["in_restricted"] else (0, 150, 0)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+            cv2.putText(frame, det["label"], (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, text_color, 2, cv2.LINE_AA)
+ 
+        # ── HUD counters ─────────────────────────────────────────────────────
+        cv2.putText(frame, f"Daycare pets: {daycare_pet_count}",
+                    (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 230, 0), 2, cv2.LINE_AA)
+        cv2.putText(frame, f"Restricted pets: {restricted_pet_count}",
+                    (mid_x + 6, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 50, 255), 2, cv2.LINE_AA)
+ 
+        # ── Alert banners ─────────────────────────────────────────────────────
+        banner_y = 0
 
-       frame = cv2.resize(frame, (STREAM_WIDTH, STREAM_HEIGHT))
-       frame_h, frame_w = frame.shape[:2]
-       focus_zone_coords = (ZONE_RATIOS * [frame_w, frame_h]).astype(np.int32)
-       ZONES = {"focus_zone": focus_zone_coords}
+        if restricted_pet_count > 0:
+            with alert_lock:
+                alert_restricted_until = now + ALERT_DISPLAY_SEC
+ 
+        if daycare_pet_count > DAYCARE_CROWD_THRESHOLD:
+            with alert_lock:
+                alert_crowded_until = now + ALERT_DISPLAY_SEC
 
-       results = detector_model.track(frame, persist=True, tracker="bytetrack.yaml", verbose=False)
+        with alert_lock:
+            show_restricted = now < alert_restricted_until
+            show_crowded = now < alert_crowded_until
 
-       zone_count = 0
-       detection_list = []
-       cv2.polylines(frame, [ZONES["focus_zone"]], True, (0, 255, 255), 2)
-
-       for r in results:
-           if r.boxes is not None and r.boxes.id is not None:
-               for box, track_id_tensor in zip(r.boxes, r.boxes.id):
-                   class_id = int(box.cls[0])
-                   track_id = int(track_id_tensor.item())
-
-                   if class_id in [0, 16]:
-                       x1, y1, x2, y2 = map(int, box.xyxy[0])
-                       bottom_center = (int((x1 + x2) / 2), y2)
-
-                       if cv2.pointPolygonTest(ZONES["focus_zone"], bottom_center, False) >= 0:
-                           zone_count += 1
-                           cv2.circle(frame, bottom_center, 6, (0, 0, 255), -1)
-
-                           if class_id == 0:
-                               display_label = f"Person [ID: {track_id}]"
-                           else:
-                               with breed_lock:
-                                   breed_status = latest_breeds.get(track_id)
-
-                               if breed_status is not None:
-                                   display_label = f"ID {track_id}: {breed_status}"
-                               else:
-                                   display_label = f"ID {track_id}: Analyzing Breed..."
-
-                                   if not classifier_queue.full():
-                                       pad = 10
-                                       crop = frame[max(0, y1 - pad):min(frame_h, y2 + pad), max(0, x1 - pad):min(frame_w, x2 + pad)]
-
-                                       if crop.size > 0:
-                                           classifier_queue.put_nowait({"crop": crop, "id": track_id})
-
-                           detection_list.append({"coords": (x1, y1, x2, y2), "label": display_label})
-
-       for det in detection_list:
-           x1, y1, x2, y2 = det["coords"]
-           cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-           cv2.putText(frame, det["label"], (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 150, 0), 2)
-
-       current_time = time.time()
-
-       if zone_count > MAX_PLAYROOM_CAPACITY:
-           alert_text = "OVERCROWDING ALERT"
-           cv2.putText(frame, alert_text, (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-
-           if current_time - last_alert_time >= ALERT_COOLDOWN_SECONDS:
-               detected_labels = [det["label"] for det in detection_list]
-               send_alert(frame=frame.copy(), alert_label=alert_text, zone_count=zone_count, detections=detected_labels)
-               last_alert_time = current_time
-
-       cv2.putText(frame, f"Entities: {zone_count}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-       cv2.imshow("Jetson Pet Detection", frame)
-
-       yuv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420)
-       if frame_queue.full():
-           try:
-               frame_queue.get_nowait()
-           except queue.Empty:
-               pass
-       frame_queue.put(yuv_frame)
-
-       if cv2.waitKey(1) & 0xFF == ord("q"):
-           break
+        if show_restricted:
+            msg = (f"ALERT: {restricted_pet_count} PET(S) IN RESTRICTED ZONE!")
+            draw_alert_banner(frame, msg, (0,0,200), y_offset=banner_y)
+            banner_y += 46
+        
+        if show_crowded:
+            msg = f"CROWDED: {daycare_pet_count} PETS IN DAYCARE ZONE (limit {DAYCARE_CROWD_THRESHOLD})"
+            draw_alert_banner(frame, msg, (0,130,200), y_offset=banner_y)
+ 
+        cv2.imshow("Jetson Pet Detection", frame)
+ 
+        yuv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420)
+        if frame_queue.full():
+            try:
+                frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+        frame_queue.put(yuv_frame)
+ 
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
 
 finally:
    print("Shutting down cleanly...")
