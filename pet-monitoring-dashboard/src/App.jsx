@@ -1,41 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import "./App.css";
-
-const mockIncidents = [
-  {
-    id: "INC-001",
-    type: "Pet Barking",
-    camera: "Living Room",
-    timestamp: "2026-05-20 2:32 PM",
-    confidence: 91,
-    videoUrl: "https://www.w3schools.com/html/mov_bbb.mp4",
-  },
-  {
-    id: "INC-002",
-    type: "Pet Fighting",
-    camera: "Playroom",
-    timestamp: "2026-05-20 3:10 PM",
-    confidence: 84,
-    videoUrl: "https://www.w3schools.com/html/movie.mp4",
-  },
-  {
-    id: "INC-003",
-    type: "Bathroom Event",
-    camera: "Litter Area",
-    timestamp: "2026-05-20 4:05 PM",
-    confidence: 88,
-    videoUrl: "https://www.w3schools.com/html/mov_bbb.mp4",
-  },
-  {
-    id: "INC-004",
-    type: "Suspicious Human",
-    camera: "Front Door",
-    timestamp: "2026-05-20 5:18 PM",
-    confidence: 93,
-    videoUrl: "https://www.w3schools.com/html/movie.mp4",
-  },
-];
+import {collection,query,orderBy,limit,onSnapshot} from "firebase/firestore";
+import { db } from "./firebase";
 
 function LiveStreamPlayer({ streamUrl }) {
   const videoRef = useRef(null);
@@ -69,10 +36,44 @@ function LiveStreamPlayer({ streamUrl }) {
 function App() {
   const [streamInput, setStreamInput] = useState("");
   const [streamUrl, setStreamUrl] = useState("");
-  const [selectedIncident, setSelectedIncident] = useState(mockIncidents[0]);
+  const [alerts, setAlerts] = useState([]);
+  const [selectedAlert, setSelectedAlert] = useState(null);
+
+  useEffect(() => {
+    const alertsQuery = query(
+      collection(db, "alerts"),
+      orderBy("received_at", "desc"),
+      limit(20)
+    );
+
+    const unsubscribe = onSnapshot(alertsQuery, (snapshot) => {
+      const alertData = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      }));
+
+      setAlerts(alertData);
+
+      if (alertData.length > 0) {
+        setSelectedAlert((currentSelected) => currentSelected || alertData[0]);
+      }
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   function loadStream() {
     setStreamUrl(streamInput.trim());
+  }
+
+  function formatTime(alert) {
+    const timeValue = alert.received_at || alert.timestamp;
+
+    if (!timeValue) {
+      return "Unknown";
+    }
+
+    return new Date(timeValue).toLocaleString();
   }
 
   return (
@@ -106,38 +107,77 @@ function App() {
       <section className="section">
         <h2>Alerts</h2>
 
-        <div className="layout">
-          <div className="alert-list">
-            {mockIncidents.map((incident) => (
-              <button
-                key={incident.id}
-                className={
-                  selectedIncident.id === incident.id
-                    ? "alert-card selected"
-                    : "alert-card"
-                }
-                onClick={() => setSelectedIncident(incident)}
-              >
-                <strong>{incident.type}</strong>
-                <span>{incident.camera}</span>
-                <span>{incident.timestamp}</span>
-                <span>{incident.confidence}% confidence</span>
-              </button>
-            ))}
-          </div>
+        {alerts.length === 0 ? (
+          <p>No alerts received yet.</p>
+        ) : (
+          <div className="layout">
+            <div className="alert-list">
+              {alerts.map((alert) => (
+                <button
+                  key={alert.id}
+                  className={
+                    selectedAlert?.id === alert.id
+                      ? "alert-card selected"
+                      : "alert-card"
+                  }
+                  onClick={() => setSelectedAlert(alert)}
+                >
+                  <strong>{alert.label || alert.event_type || "Alert"}</strong>
+                  <span>
+                    Camera: {alert.camera_id || alert.device_id || "Unknown"}
+                  </span>
+                  <span>Time: {formatTime(alert)}</span>
+                  <span>Zone Count: {alert.zone_count ?? "N/A"}</span>
+                </button>
+              ))}
+            </div>
 
-          <div className="clip-viewer">
-            <h3>{selectedIncident.type}</h3>
-            <p>Camera: {selectedIncident.camera}</p>
-            <p>Time: {selectedIncident.timestamp}</p>
-            <p>Confidence: {selectedIncident.confidence}%</p>
+            {selectedAlert && (
+              <div className="clip-viewer">
+                <h3>
+                  {selectedAlert.label ||
+                    selectedAlert.event_type ||
+                    "Alert Details"}
+                </h3>
 
-            <video className="video-player" controls>
-              <source src={selectedIncident.videoUrl} type="video/mp4" />
-              Your browser does not support video playback.
-            </video>
+                <p>
+                  Camera:{" "}
+                  {selectedAlert.camera_id ||
+                    selectedAlert.device_id ||
+                    "Unknown"}
+                </p>
+
+                <p>Time: {formatTime(selectedAlert)}</p>
+
+                <p>Zone Count: {selectedAlert.zone_count ?? "N/A"}</p>
+
+                <p>Max Capacity: {selectedAlert.max_capacity ?? "N/A"}</p>
+
+                <p>
+                  Event Type: {selectedAlert.event_type || "N/A"}
+                </p>
+
+                {selectedAlert.detections &&
+                  selectedAlert.detections.length > 0 && (
+                    <div>
+                      <p>Detections:</p>
+                      <ul>
+                        {selectedAlert.detections.map((detection, index) => (
+                          <li key={index}>{detection}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                {selectedAlert.snapshot_uri && (
+                  <p className="snapshot-text">
+                    Snapshot: {selectedAlert.snapshot_uri}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
-        </div>
+        )}
       </section>
     </div>
   );

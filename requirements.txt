@@ -1,3 +1,10 @@
 flask
+gunicorn
 google-cloud-firestore
 google-cloud-storage
+requests
+numpy
+opencv-python-headless
+ultralytics
+torch
+torchvision
