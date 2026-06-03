@@ -169,11 +169,19 @@ function App() {
                     </div>
                   )}
 
-                {selectedAlert.snapshot_uri && (
+                {selectedAlert.image_url && (
+                  <img
+                    className="alert-image"
+                    src={selectedAlert.image_url}
+                    alt="Alert snapshot"
+                  />
+                )}
+
+                {/*{selectedAlert.snapshot_uri && (
                   <p className="snapshot-text">
                     Snapshot: {selectedAlert.snapshot_uri}
                   </p>
-                )}
+                )}*/}
               </div>
             )}
           </div>

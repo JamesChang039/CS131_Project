@@ -12,6 +12,7 @@ import datetime
 import socket
 import tempfile
 from google.cloud import storage
+from datetime import timedelta
 
 #run this on jetson terminal first
 #export GOOGLE_APPLICATION_CREDENTIALS="path to json file"
@@ -278,7 +279,7 @@ classifier_thread = threading.Thread(target=breed_classifier_worker, daemon=True
 classifier_thread.start()
 
 #Upload snapshot
-def upload_snapshot_to_storage(frame: np.ndarray, alert_label: str) -> str:
+def upload_snapshot_to_storage(frame: np.ndarray, alert_label: str):
     try:
         timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
         safe_label = alert_label.lower().replace(" ", "_")
@@ -292,19 +293,27 @@ def upload_snapshot_to_storage(frame: np.ndarray, alert_label: str) -> str:
         storage_client = storage.Client()
         bucket = storage_client.bucket(FIREBASE_STORAGE_BUCKET)
         blob = bucket.blob(filename)
+
         blob.upload_from_filename(tmp_path, content_type="image/jpeg")
 
         os.remove(tmp_path)
 
-        gcs_uri = f"gs://{FIREBASE_STORAGE_BUCKET}/{filename}"
-        print(f"[Storage] Snapshot uploaded: {gcs_uri}")
+        snapshot_uri = f"gs://{FIREBASE_STORAGE_BUCKET}/{filename}"
 
-        return gcs_uri
+        image_url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(days=7),
+            method="GET"
+        )
+
+        print(f"[Storage] Snapshot uploaded: {snapshot_uri}")
+        print(f"[Storage] Signed image URL generated.")
+
+        return snapshot_uri, image_url
 
     except Exception as e:
         print(f"[Storage] Snapshot upload failed: {e}")
-        return "unavailable"
-
+        return "unavailable", None
 
 """
 Send Alert
@@ -312,7 +321,7 @@ Send Alert
 def send_alert(frame: np.ndarray, alert_label: str, zone_count: int, detections: list):
     print(f"\n[ALERT] {alert_label} — uploading snapshot and sending alert to Cloud Run...")
 
-    snapshot_uri = upload_snapshot_to_storage(frame, alert_label)
+    snapshot_uri, image_url = upload_snapshot_to_storage(frame, alert_label)
 
     payload = {
         "device_id": DEVICE_ID,
@@ -323,6 +332,7 @@ def send_alert(frame: np.ndarray, alert_label: str, zone_count: int, detections:
         "max_capacity": MAX_PLAYROOM_CAPACITY,
         "detections": detections,
         "snapshot_uri": snapshot_uri,
+        "image_url": image_url,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
     }
 

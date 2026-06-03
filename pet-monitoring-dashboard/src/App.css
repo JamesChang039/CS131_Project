@@ -202,6 +202,14 @@ p {
   margin: 4px 0;
 }
 
+.alert-image {
+  width: 100%;
+  max-width: 500px;
+  border-radius: 12px;
+  margin-top: 1rem;
+  display: block;
+}
+
 @media (max-width: 800px) {
   .app {
     padding: 22px 16px;
