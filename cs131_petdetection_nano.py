@@ -58,7 +58,8 @@ ALERT_COOLDOWN_SEC      = 3.0     # Seconds between repeated on-screen alerts
 # ])
 
 frame_queue = queue.Queue(maxsize=30)
-classifier_queue = queue.Queue(maxsize=2) 
+classifier_queue = queue.Queue(maxsize=2)
+alert_queue = queue.Queue(maxsize=5)
 
 running = True
 
@@ -346,6 +347,32 @@ def send_alert(frame: np.ndarray, alert_label: str, zone_count: int, detections:
 
     print("[ALERT] Pipeline complete.\n")
 
+def alert_upload_thread():
+    global running
+    print("[Alert Upload Thread] Background alert thread active.")
+
+    while running:
+        try:
+            alert_item = alert_queue.get(timeout=0.2)
+        except queue.Empty:
+            continue
+
+        try:
+            send_alert(
+                frame=alert_item["frame"],
+                alert_label=alert_item["alert_label"],
+                zone_count=alert_item["zone_count"],
+                detections=alert_item["detections"]
+            )
+        except Exception as e:
+            print(f"[Alert Upload Thread ERROR] Failed to send alert: {e}")
+
+        finally:
+            alert_queue.task_done()
+
+alert_thread = threading.Thread(target=alert_upload_thread, daemon=True)
+alert_thread.start()
+
 # =========================
 # Main AI Processing Loop
 # =========================
@@ -497,22 +524,28 @@ try:
             detected_labels = [det["label"] for det in detection_list]
 
             if restricted_pet_count > 0:
-                send_alert(
-                    frame=frame.copy(),
-                    alert_label="Restricted Zone Alert",
-                    zone_count=restricted_pet_count,
-                    detections=detected_labels
-                )
-                last_alert_time = current_time
+                if not alert_queue.full():
+                    alert_queue.put_nowait({
+                        "frame": frame.copy(),
+                        "alert_label": "Restricted Zone Alert",
+                        "zone_count": restricted_pet_count,
+                        "detections": detected_labels
+                    })
+                    last_alert_time = current_time
+                else:
+                    print("[Alert Queue] Queue full — skipping restricted zone alert.")
 
             elif daycare_pet_count > DAYCARE_CROWD_THRESHOLD:
-                send_alert(
-                    frame=frame.copy(),
-                    alert_label="Crowded Daycare Alert",
-                    zone_count=daycare_pet_count,
-                    detections=detected_labels
-                )
-                last_alert_time = current_time
+                if not alert_queue.full():
+                    alert_queue.put_nowait({
+                        "frame": frame.copy(),
+                        "alert_label": "Crowded Daycare Alert",
+                        "zone_count": daycare_pet_count,
+                        "detections": detected_labels
+                    })
+                    last_alert_time = current_time
+                else:
+                    print("[Alert Queue] Queue full — skipping crowded daycare alert.")
 
         cv2.imshow("Jetson Pet Detection", frame)
  
@@ -533,4 +566,5 @@ finally:
    cap.release()
    cv2.destroyAllWindows()
    packer_thread.join(timeout=3.0)
+   alert_thread.join(timeout=3.0)
    print("Done.")

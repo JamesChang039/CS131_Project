@@ -34,8 +34,9 @@ function LiveStreamPlayer({ streamUrl }) {
 }
 
 function App() {
-  const [streamInput, setStreamInput] = useState("");
-  const [streamUrl, setStreamUrl] = useState("");
+  const DEFAULT_STREAM_URL = "PUT_YOUR_M3U8_LINK_HERE";
+  const [streamInput, setStreamInput] = useState(DEFAULT_STREAM_URL);
+  const [streamUrl, setStreamUrl] = useState(DEFAULT_STREAM_URL);
   const [alerts, setAlerts] = useState([]);
   const [selectedAlert, setSelectedAlert] = useState(null);
 
