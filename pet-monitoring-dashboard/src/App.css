@@ -187,6 +187,21 @@ p {
   margin-top: 14px;
 }
 
+.snapshot-text {
+  word-break: break-all;
+  font-size: 14px;
+  color: #cbd5e1;
+}
+
+.clip-viewer ul {
+  color: #cbd5e1;
+  padding-left: 22px;
+}
+
+.clip-viewer li {
+  margin: 4px 0;
+}
+
 @media (max-width: 800px) {
   .app {
     padding: 22px 16px;

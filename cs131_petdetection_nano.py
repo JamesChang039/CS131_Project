@@ -7,10 +7,31 @@ import subprocess
 import threading
 import time
 import queue
+import requests
+import datetime
+import socket
+import tempfile
+from google.cloud import storage
+
+#run this on jetson terminal first
+#export GOOGLE_APPLICATION_CREDENTIALS="path to json file"
+#export FIREBASE_STORAGE_BUCKET="cs131-final-project-497022.firebasestorage.app"
 
 # =========================
 # Configuration
 # =========================
+MAX_PLAYROOM_CAPACITY = 3
+
+DEVICE_ID = os.environ.get("DEVICE_ID", socket.gethostname())
+
+CLOUD_RUN_ALERT_URL = os.environ.get(
+    "CLOUD_RUN_ALERT_URL",
+    "https://cs131-project-828167211823.europe-west1.run.app/alert"
+)
+FIREBASE_STORAGE_BUCKET = os.environ.get("FIREBASE_STORAGE_BUCKET", "cs131-final-project-497022.firebasestorage.app")
+
+ALERT_COOLDOWN_SECONDS = 15
+last_alert_time = 0
 
 RTMP_URL = os.environ.get("RTMP_URL")
 
@@ -256,6 +277,64 @@ packer_thread.start()
 classifier_thread = threading.Thread(target=breed_classifier_worker, daemon=True)
 classifier_thread.start()
 
+#Upload snapshot
+def upload_snapshot_to_storage(frame: np.ndarray, alert_label: str) -> str:
+    try:
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S")
+        safe_label = alert_label.lower().replace(" ", "_")
+        filename = f"alerts/{DEVICE_ID}/snapshot_{safe_label}_{timestamp}.jpg"
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        cv2.imwrite(tmp_path, frame)
+
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(FIREBASE_STORAGE_BUCKET)
+        blob = bucket.blob(filename)
+        blob.upload_from_filename(tmp_path, content_type="image/jpeg")
+
+        os.remove(tmp_path)
+
+        gcs_uri = f"gs://{FIREBASE_STORAGE_BUCKET}/{filename}"
+        print(f"[Storage] Snapshot uploaded: {gcs_uri}")
+
+        return gcs_uri
+
+    except Exception as e:
+        print(f"[Storage] Snapshot upload failed: {e}")
+        return "unavailable"
+
+
+"""
+Send Alert
+"""
+def send_alert(frame: np.ndarray, alert_label: str, zone_count: int, detections: list):
+    print(f"\n[ALERT] {alert_label} — uploading snapshot and sending alert to Cloud Run...")
+
+    snapshot_uri = upload_snapshot_to_storage(frame, alert_label)
+
+    payload = {
+        "device_id": DEVICE_ID,
+        "camera_id": DEVICE_ID,
+        "event_type": alert_label.lower().replace(" ", "_"),
+        "label": alert_label,
+        "zone_count": zone_count,
+        "max_capacity": MAX_PLAYROOM_CAPACITY,
+        "detections": detections,
+        "snapshot_uri": snapshot_uri,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+
+    try:
+        response = requests.post(CLOUD_RUN_ALERT_URL, json=payload, timeout=5)
+        print(f"[Cloud Run] Status: {response.status_code}")
+        print(f"[Cloud Run] Response: {response.text}")
+
+    except Exception as e:
+        print(f"[Cloud Run] Failed to send alert: {e}")
+
+    print("[ALERT] Pipeline complete.\n")
 
 # =========================
 # Main AI Processing Loop
@@ -399,7 +478,32 @@ try:
         if show_crowded:
             msg = f"CROWDED: {daycare_pet_count} PETS IN DAYCARE ZONE (limit {DAYCARE_CROWD_THRESHOLD})"
             draw_alert_banner(frame, msg, (0,130,200), y_offset=banner_y)
- 
+
+
+        # ── Send Cloud/Firebase alert ───────────────────────────────────────
+        current_time = time.time()
+
+        if current_time - last_alert_time >= ALERT_COOLDOWN_SECONDS:
+            detected_labels = [det["label"] for det in detection_list]
+
+            if restricted_pet_count > 0:
+                send_alert(
+                    frame=frame.copy(),
+                    alert_label="Restricted Zone Alert",
+                    zone_count=restricted_pet_count,
+                    detections=detected_labels
+                )
+                last_alert_time = current_time
+
+            elif daycare_pet_count > DAYCARE_CROWD_THRESHOLD:
+                send_alert(
+                    frame=frame.copy(),
+                    alert_label="Crowded Daycare Alert",
+                    zone_count=daycare_pet_count,
+                    detections=detected_labels
+                )
+                last_alert_time = current_time
+
         cv2.imshow("Jetson Pet Detection", frame)
  
         yuv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420)

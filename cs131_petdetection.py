@@ -29,6 +29,7 @@ ALERT_TEXT = ""
 DEVICE_ID = os.environ.get("DEVICE_ID", "jetson-nano-01")
 GCS_BUCKET = os.environ.get("GCS_BUCKET", "cs131detections")
 PUBSUB_TOPIC = os.environ.get("PUBSUB_TOPIC", "projects/cs131-final-project-497022/topics/detections")
+CLOUD_RUN_ALERT_URL = os.environ.get("CLOUD_RUN_ALERT_URL","https://cs131-project-828167211823.europe-west1.run.app/alert")
 
 TWILIO_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
@@ -92,8 +93,8 @@ def generate_signed_url(gcs_uri: str, expiration_minutes: int = 60) -> str:
         print(f"[GCS] Could not generate signed URL: {e}")
         return gcs_uri  # fallback to raw GCS path
 
-
-def publish_to_pubsub(alert_label: str, zone_count: int, gcs_uri: str, detections: list):
+# Unused currently since we are sending our alerts directly to cloud run 
+"""def publish_to_pubsub(alert_label: str, zone_count: int, gcs_uri: str, detections: list):
     try:
         publisher = pubsub_v1.PublisherClient()
 
@@ -113,7 +114,7 @@ def publish_to_pubsub(alert_label: str, zone_count: int, gcs_uri: str, detection
         print(f"[PubSub] Alert published. Message ID: {future.result()}")
 
     except Exception as e:
-        print(f"[PubSub] Publish failed: {e}")
+        print(f"[PubSub] Publish failed: {e}")"""
 
 
 def send_twilio_sms(alert_label: str, zone_count: int, signed_url: str, detections: list):
@@ -144,15 +145,33 @@ def send_twilio_sms(alert_label: str, zone_count: int, signed_url: str, detectio
 
 
 def send_alert(frame: np.ndarray, alert_label: str, zone_count: int, detections: list):
-    print(f"\n[ALERT] {alert_label} — triggering alert pipeline...")
+    print(f"\n[ALERT] {alert_label} — sending alert to Cloud Run...")
 
-    gcs_uri = upload_snapshot_to_gcs(frame, alert_label)
-    signed_url = generate_signed_url(gcs_uri)
+    payload = {
+        "device_id": DEVICE_ID,
+        "camera_id": DEVICE_ID,
+        "event_type": alert_label.lower().replace(" ", "_"),
+        "label": alert_label,
+        "zone_count": zone_count,
+        "max_capacity": MAX_PLAYROOM_CAPACITY,
+        "detections": detections,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
 
-    publish_to_pubsub(alert_label, zone_count, gcs_uri, detections)
-    send_twilio_sms(alert_label, zone_count, signed_url, detections)
+    try:
+        response = requests.post(
+            CLOUD_RUN_ALERT_URL,
+            json=payload,
+            timeout=5
+        )
 
-    print(f"[ALERT] Pipeline complete.\n")
+        print(f"[Cloud Run] Status: {response.status_code}")
+        print(f"[Cloud Run] Response: {response.text}")
+
+    except Exception as e:
+        print(f"[Cloud Run] Failed to send alert: {e}")
+
+    print("[ALERT] Pipeline complete.\n")
 
 
 
