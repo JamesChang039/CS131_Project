@@ -34,7 +34,7 @@ function LiveStreamPlayer({ streamUrl }) {
 }
 
 function App() {
-  const DEFAULT_STREAM_URL = "PUT_YOUR_M3U8_LINK_HERE";
+  const DEFAULT_STREAM_URL = "https://storage.googleapis.com/cs131-petdaycare-live/live-output/main.m3u8";;
   const [streamInput, setStreamInput] = useState(DEFAULT_STREAM_URL);
   const [streamUrl, setStreamUrl] = useState(DEFAULT_STREAM_URL);
   const [alerts, setAlerts] = useState([]);
@@ -84,7 +84,7 @@ function App() {
       <section className="section">
         <h2>Live Feed</h2>
 
-        <div className="input-row">
+        {/*<div className="input-row">
           <input
             type="text"
             placeholder="Paste .m3u8 stream link here"
@@ -96,7 +96,7 @@ function App() {
           />
 
           <button onClick={loadStream}>Load Stream</button>
-        </div>
+        </div>*/}
 
         {streamUrl ? (
           <LiveStreamPlayer streamUrl={streamUrl} />
