@@ -31,9 +31,6 @@ CLOUD_RUN_ALERT_URL = os.environ.get(
 )
 FIREBASE_STORAGE_BUCKET = os.environ.get("FIREBASE_STORAGE_BUCKET", "cs131-final-project-497022.firebasestorage.app")
 
-ALERT_COOLDOWN_SECONDS = 15
-last_alert_time = 0
-
 RTMP_URL = os.environ.get("RTMP_URL")
 
 STREAM_WIDTH = 640
@@ -48,7 +45,8 @@ RESTRICTED_ZONE_RATIO = np.array([[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]
  
 # Alert thresholds
 DAYCARE_CROWD_THRESHOLD = 3       # "Crowded" when pet count EXCEEDS this value
-ALERT_COOLDOWN_SEC      = 3.0     # Seconds between repeated on-screen alerts
+ALERT_COOLDOWN_SECONDS = 15        # Seconds between repeated on-screen alerts
+last_alert_time = 0     
 
 # ZONE_RATIOS = np.array([
 #    [0.0, 0.0],
