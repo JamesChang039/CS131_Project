@@ -34,8 +34,9 @@ function LiveStreamPlayer({ streamUrl }) {
 }
 
 function App() {
-  const [streamInput, setStreamInput] = useState("");
-  const [streamUrl, setStreamUrl] = useState("");
+  const DEFAULT_STREAM_URL = "PUT_YOUR_M3U8_LINK_HERE";
+  const [streamInput, setStreamInput] = useState(DEFAULT_STREAM_URL);
+  const [streamUrl, setStreamUrl] = useState(DEFAULT_STREAM_URL);
   const [alerts, setAlerts] = useState([]);
   const [selectedAlert, setSelectedAlert] = useState(null);
 
@@ -169,11 +170,19 @@ function App() {
                     </div>
                   )}
 
-                {selectedAlert.snapshot_uri && (
+                {selectedAlert.image_url && (
+                  <img
+                    className="alert-image"
+                    src={selectedAlert.image_url}
+                    alt="Alert snapshot"
+                  />
+                )}
+
+                {/*{selectedAlert.snapshot_uri && (
                   <p className="snapshot-text">
                     Snapshot: {selectedAlert.snapshot_uri}
                   </p>
-                )}
+                )}*/}
               </div>
             )}
           </div>
