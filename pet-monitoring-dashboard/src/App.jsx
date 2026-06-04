@@ -34,7 +34,7 @@ function LiveStreamPlayer({ streamUrl }) {
 }
 
 function App() {
-  const DEFAULT_STREAM_URL = "https://storage.googleapis.com/cs131-petdaycare-live/live-output/main.m3u8";;
+  const DEFAULT_STREAM_URL = "https://storage.googleapis.com/cs131-petdaycare-live/live-output/main.m3u8";
   const [streamInput, setStreamInput] = useState(DEFAULT_STREAM_URL);
   const [streamUrl, setStreamUrl] = useState(DEFAULT_STREAM_URL);
   const [alerts, setAlerts] = useState([]);
